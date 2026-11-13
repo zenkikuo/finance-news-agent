@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   monitor:
@@ -45,24 +44,18 @@ jobs:
           git add seen_finance.json
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update seen finance news" && git push)
 
-      - name: Run Auto-Debug Agent on Failure
+      # --- 失敗時全自動修復、直接推回 main 並重跑驗證（零衝突、免手動 Merge） ---
+      - name: Auto-Fix and Push Directly to Main
         if: failure()
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: python debug_agent.py
-
-      - name: Create Pull Request with AI Fix
-        if: failure()
-        uses: peter-evans/create-pull-request@v7
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "fix: auto-patch finance_monitor.py by AI Debug Agent"
-          title: "🤖 [Auto-Debug] AI 修復 finance_monitor.py (#${{ github.run_number }})"
-          body-path: pr_body.md
-          branch: ai-hotfix/finance-${{ github.run_id }}
-          add-paths: |
-            finance_monitor.py
-            pr_body.md
-          delete-branch: true
+        run: |
+          python debug_agent.py
+          git config --local user.email "action@github.com"
+          git config --local user.name "AI Debug Agent"
+          git add finance_monitor.py
+          git diff --quiet && git diff --staged --quiet || (git commit -m "fix(auto-heal): patch finance_monitor.py automatically" && git push)
+          echo "🔄 重新執行修復後的 finance_monitor.py 驗證..."
+          python finance_monitor.py
