@@ -5,7 +5,6 @@ import time
 import asyncio
 import hashlib
 import subprocess
-import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 
@@ -21,14 +20,18 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 SEEN_FILE = "seen_finance.json"
 TAIPEI_TZ = timezone(timedelta(hours=8))
 
-# 三大穩定財經新聞 RSS 來源（避開反爬蟲封鎖）
+FALLBACK_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+]
+
 RSS_SOURCES = [
     ("Reuters 路透財經", "https://news.google.com/rss/search?q=site:reuters.com+(markets+OR+semiconductor+OR+fed+OR+ai+OR+tariff)&hl=en-US&gl=US&ceid=US:en"),
     ("AP News 美聯社財經", "https://news.google.com/rss/search?q=site:apnews.com+(business+OR+economy+OR+tech+OR+fed+OR+chip)&hl=en-US&gl=US&ceid=US:en"),
     ("新浪財經全球焦點", "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
 ]
 
-# 第一層硬性關鍵字初篩（命中任一才送入 LLM 評分，節省 Token 與過濾雜訊）
 KEYWORDS = [
     "fed", "powell", "cpi", "ppi", "rate", "treasury", "yield", "inflation", "tariff", "boj", "yen",
     "nvidia", "tsmc", "taiwan", "semiconductor", "chip", "ai", "apple", "microsoft", "google", "meta",
@@ -84,7 +87,6 @@ def fetch_rss_candidates(seen_ids: set) -> list:
     return candidates[:15]
 
 def analyze_taiwan_impact(candidates: list) -> dict:
-    """第二層：台股交易員視角評分（只放行 >= 4 星重大事件）"""
     news_text = "\n".join(
         [f"- [{c['source']}] {c['title']} ({c['pub_date']})" for c in candidates]
     )
@@ -107,22 +109,30 @@ def analyze_taiwan_impact(candidates: list) -> dict:
     {news_text}
     """
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-    )
-    clean_text = re.sub(r"^```json\s*|\s*```$", "", response.text.strip(), flags=re.MULTILINE)
-    return json.loads(clean_text)
+    last_err = None
+    for model_name in FALLBACK_MODELS:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            clean_text = re.sub(r"^```json\s*|\s*```$", "", response.text.strip(), flags=re.MULTILINE)
+            return json.loads(clean_text)
+        except Exception as e:
+            last_err = e
+            print(f"⚠️ {model_name} 分析暫時失敗，切換備援模型: {e}", flush=True)
+            time.sleep(3)
+    raise RuntimeError(f"所有分析模型皆失敗: {last_err}")
 
 async def generate_tts(text: str, output_mp3: str):
-    communicate = edge_tts.Communicate(text, voice="zh-TW-YunJheNeural", rate="+8%")
+    clean_speech = re.sub(r"[^\w\u4e00-\u9fff，。！？、；：（）%0-9a-zA-Z\s]", "", text)
+    communicate = edge_tts.Communicate(clean_speech, voice="zh-TW-YunJheNeural", rate="+5%")
     await communicate.save(output_mp3)
 
 def create_video_card(analysis: dict, audio_path: str, output_mp4: str):
-    """生成 1080x1920 直式專業財經快報短影音"""
     img_path = "finance_card.png"
     W, H = 1080, 1920
-    img = Image.new("RGB", (W, H), color=(15, 23, 42))  # 深藍金融背景
+    img = Image.new("RGB", (W, H), color=(15, 23, 42))
     draw = ImageDraw.Draw(img)
 
     font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
@@ -138,26 +148,22 @@ def create_video_card(analysis: dict, audio_path: str, output_mp4: str):
     sentiment = analysis.get("sentiment", "中性觀望")
     badge_color = (220, 38, 38) if "利多" in sentiment else ((22, 163, 74) if "利空" in sentiment else (202, 138, 4))
 
-    # 頂部狀態標籤列
     draw.rectangle([70, 120, 1010, 210], fill=badge_color)
     draw.text((100, 140), f"⚡ 全球財經快報｜台股影響：{sentiment}（{'★' * analysis.get('max_score', 4)}）", fill=(255, 255, 255), font=font_tag)
     draw.text((70, 240), now_str, fill=(148, 163, 184), font=font_body)
 
-    # 主標題自動換行
     headline = analysis.get("headline", "國際財經重大快訊")
     y_cursor = 340
     for i in range(0, len(headline), 13):
         draw.text((70, y_cursor), headline[i:i+13], fill=(248, 250, 252), font=font_title)
         y_cursor += 88
 
-    # 受影響台股族群區塊
     y_cursor += 40
     draw.rectangle([70, y_cursor, 1010, y_cursor + 180], fill=(30, 41, 59))
     draw.text((95, y_cursor + 20), "🎯 連動台股族群與焦點：", fill=(56, 189, 248), font=font_sub)
     sectors = analysis.get("affected_sectors", "台股權值與科技供應鏈")
     draw.text((95, y_cursor + 85), sectors[:22], fill=(255, 255, 255), font=font_body)
 
-    # 口播摘要內文區塊
     y_cursor += 230
     script = analysis.get("voice_script", "")
     for i in range(0, len(script), 23):
@@ -188,7 +194,6 @@ def main():
     print(f"📥 抓到 {len(candidates)} 則關鍵字候選新聞，送交 AI 評估對台股影響力...", flush=True)
     analysis = analyze_taiwan_impact(candidates)
 
-    # 無論是否達 4 星，皆記錄已檢查過，避免重複耗費 Token
     for c in candidates:
         seen_list.append(c["uid"])
     save_seen(seen_list)
@@ -197,20 +202,7 @@ def main():
         print(f"📉 最高影響評分為 {analysis.get('max_score', 0)} 星（未達 4 星門檻），靜默略過推播。", flush=True)
         return
 
-    print(f"🚨 偵測到 {analysis['max_score']} 星重大財經事件！開始生成語音與短影音...", flush=True)
-    audio_file = "finance_voice.mp3"
-    video_file = "finance_brief.mp4"
-
-    # BEGIN FIX: Check and provide fallback for empty voice_script
-    voice_script_content = analysis.get("voice_script", "").strip()
-    if not voice_script_content:
-        print("⚠️ AI 未能生成有效的語音腳本，使用預設腳本。", flush=True)
-        analysis["voice_script"] = "今日財經快報的語音內容生成失敗，但偵測到重大財經事件，請參閱文字摘要與影片文字內容。"
-    # END FIX
-
-    asyncio.run(generate_tts(analysis["voice_script"], audio_file))
-    create_video_card(analysis, audio_file, video_file)
-
+    print(f"🚨 偵測到 {analysis['max_score']} 星重大財經事件！準備推播 Discord...", flush=True)
     sources_links = "\n".join([f"• [{c['source']}] [{c['title']}]({c['link']})" for c in candidates[:4]])
     msg = (
         f"🚨 **【{analysis['max_score']}★ 全球財經快報】{analysis['headline']}**\n"
@@ -218,16 +210,23 @@ def main():
         f"{analysis['discord_brief']}\n\n"
         f"**🔗 原始新聞來源：**\n{sources_links}"
     )
-
     requests.post(DISCORD_WEBHOOK, json={"content": msg[:1950]}, timeout=15).raise_for_status()
-    with open(video_file, "rb") as vf:
-        requests.post(
-            DISCORD_WEBHOOK,
-            files={"file": ("finance_brief.mp4", vf, "video/mp4")},
-            timeout=30
-        ).raise_for_status()
 
-    print("✅ 重大財經快報與短影音已成功推送至 Discord！", flush=True)
+    # 嘗試生成語音與短影音；若微軟 TTS 在雲端機房受限則優雅降級（文字快報已送達）
+    try:
+        audio_file = "finance_voice.mp3"
+        video_file = "finance_brief.mp4"
+        asyncio.run(generate_tts(analysis["voice_script"], audio_file))
+        create_video_card(analysis, audio_file, video_file)
+        with open(video_file, "rb") as vf:
+            requests.post(
+                DISCORD_WEBHOOK,
+                files={"file": ("finance_brief.mp4", vf, "video/mp4")},
+                timeout=30
+            ).raise_for_status()
+        print("✅ 重大財經快報與短影音皆已成功推送至 Discord！", flush=True)
+    except Exception as tts_err:
+        print(f"⚠️ 語音短影音生成受限（已自動降級為純文字快報送達 Discord）: {tts_err}", flush=True)
 
 if __name__ == "__main__":
     main()
