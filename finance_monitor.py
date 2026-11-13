@@ -205,7 +205,7 @@ def main():
     voice_script_content = analysis.get("voice_script", "").strip()
     if not voice_script_content:
         print("⚠️ AI 未能生成有效的語音腳本，使用預設腳本。", flush=True)
-        analysis["voice_script"] = "今日財經快報的語音內容生成失敗，但偵測到重大財經事件，請參閱文字摘要。"
+        analysis["voice_script"] = "今日財經快報的語音內容生成失敗，但偵測到重大財經事件，請參閱文字摘要與影片文字內容。"
     # END FIX
 
     asyncio.run(generate_tts(analysis["voice_script"], audio_file))
