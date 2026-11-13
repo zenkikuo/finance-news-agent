@@ -8,7 +8,6 @@ from google import genai
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
 
-# 免費版皆有配額的模型容錯清單（主模型 503 滿載時自動切換下一顆）
 FALLBACK_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
@@ -47,7 +46,7 @@ def run_auto_debug():
     你是一位資深的 Python 自動化與 CI/CD 除錯工程師。我們的雲端財經快報排程程式 `finance_monitor.py` 在執行時發生錯誤中斷。
     請分析以下錯誤日誌與原始碼，回傳一個標準 JSON 物件（不要加任何其他說明文字），包含兩個欄位：
     1. "diagnosis": 用繁體中文簡潔說明「錯誤原因」與「修復方式」（150 字以內，準備發送到 Discord 通知開發者）。
-    2. "fixed_code": 修復完成後、可直接覆蓋存檔的「完整 `finance_monitor.py` 程式碼」（務必保留所有原有功能與正確縮排，不可省略任何段落）。
+    2. "fixed_code": 修復完成後、可直接覆蓋存檔的「完整 `finance_monitor.py` 程式碼」（務必保留所有原有功能，包含短影音生成 `create_video_card`、`generate_tts` 與 Discord 推播邏輯，絕對不可刪除或簡化任何功能段落）。
 
     【錯誤日誌 Traceback】：
     {error_trace}
