@@ -128,11 +128,17 @@ def create_video_card(analysis: dict, audio_path: str, output_mp4: str):
     font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
     if not os.path.exists(font_path):
         font_path = "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc"
+        if not os.path.exists(font_path):
+            # Fallback to a common system font if Noto isn't found, or raise an error.
+            # For robustness, we could use a default PIL font or ensure Noto is present in CI/CD env.
+            print("⚠️ 警告: 未找到 NotoSansCJK-Bold 字體，將嘗試使用系統預設字體或可能導致錯誤。", flush=True)
+            # A more robust solution for production might involve packaging the font or having a known fallback.
+            # For now, let's assume one of the paths exists or PIL handles a default if it can't find it.
 
-    font_tag = ImageFont.truetype(font_path, 42)
-    font_title = ImageFont.truetype(font_path, 66)
-    font_sub = ImageFont.truetype(font_path, 40)
-    font_body = ImageFont.truetype(font_path, 36)
+    font_tag = ImageFont.truetype(font_path, 42) if os.path.exists(font_path) else ImageFont.load_default()
+    font_title = ImageFont.truetype(font_path, 66) if os.path.exists(font_path) else ImageFont.load_default()
+    font_sub = ImageFont.truetype(font_path, 40) if os.path.exists(font_path) else ImageFont.load_default()
+    font_body = ImageFont.truetype(font_path, 36) if os.path.exists(font_path) else ImageFont.load_default()
 
     now_str = datetime.now(TAIPEI_TZ).strftime("%Y/%m/%d %H:%M 台北時間")
     sentiment = analysis.get("sentiment", "中性觀望")
@@ -175,6 +181,18 @@ def create_video_card(analysis: dict, audio_path: str, output_mp4: str):
     ]
     subprocess.run(cmd, check=True)
 
+# Helper function for sending text-only Discord message
+def send_text_discord_alert(analysis, candidates):
+    sources_links = "\n".join([f"• [{c['source']}] [{c['title']}]({c['link']})" for c in candidates[:4]])
+    msg = (
+        f"🚨 **【{analysis['max_score']}★ 全球財經快報】{analysis['headline']}**\n"
+        f"**📊 台股方向判讀：** `{analysis['sentiment']}`｜**🎯 焦點族群：** {analysis['affected_sectors']}\n\n"
+        f"{analysis['discord_brief']}\n\n"
+        f"**🔗 原始新聞來源：**\n{sources_links}"
+    )
+    requests.post(DISCORD_WEBHOOK, json={"content": msg[:1950]}, timeout=15).raise_for_status()
+    print("✅ 重大財經快報（文字版）已成功推送至 Discord！", flush=True)
+
 def main():
     print("🔍 開始巡檢 Reuters / AP News / 新浪財經 最新快訊...", flush=True)
     seen_list = load_seen()
@@ -197,30 +215,45 @@ def main():
         print(f"📉 最高影響評分為 {analysis.get('max_score', 0)} 星（未達 4 星門檻），靜默略過推播。", flush=True)
         return
 
-    print(f"🚨 偵測到 {analysis['max_score']} 星重大財經事件！開始生成語音與短影音...", flush=True)
     audio_file = "finance_voice.mp3"
     video_file = "finance_brief.mp4"
+    img_path = "finance_card.png" # Added for cleanup
 
-    asyncio.run(generate_tts(analysis["voice_script"], audio_file))
-    create_video_card(analysis, audio_file, video_file)
+    try:
+        print(f"🚨 偵測到 {analysis['max_score']} 星重大財經事件！開始生成語音與短影音...", flush=True)
+        voice_script = analysis.get("voice_script")
+        if not voice_script or not voice_script.strip():
+            raise ValueError("AI 生成的語音腳本為空或無效，無法產生音訊。")
 
-    sources_links = "\n".join([f"• [{c['source']}] [{c['title']}]({c['link']})" for c in candidates[:4]])
-    msg = (
-        f"🚨 **【{analysis['max_score']}★ 全球財經快報】{analysis['headline']}**\n"
-        f"**📊 台股方向判讀：** `{analysis['sentiment']}`｜**🎯 焦點族群：** {analysis['affected_sectors']}\n\n"
-        f"{analysis['discord_brief']}\n\n"
-        f"**🔗 原始新聞來源：**\n{sources_links}"
-    )
+        asyncio.run(generate_tts(voice_script, audio_file))
+        create_video_card(analysis, audio_file, video_file)
 
-    requests.post(DISCORD_WEBHOOK, json={"content": msg[:1950]}, timeout=15).raise_for_status()
-    with open(video_file, "rb") as vf:
-        requests.post(
-            DISCORD_WEBHOOK,
-            files={"file": ("finance_brief.mp4", vf, "video/mp4")},
-            timeout=30
-        ).raise_for_status()
+        sources_links = "\n".join([f"• [{c['source']}] [{c['title']}]({c['link']})" for c in candidates[:4]])
+        msg = (
+            f"🚨 **【{analysis['max_score']}★ 全球財經快報】{analysis['headline']}**\n"
+            f"**📊 台股方向判讀：** `{analysis['sentiment']}`｜**🎯 焦點族群：** {analysis['affected_sectors']}\n\n"
+            f"{analysis['discord_brief']}\n\n"
+            f"**🔗 原始新聞來源：**\n{sources_links}"
+        )
 
-    print("✅ 重大財經快報與短影音已成功推送至 Discord！", flush=True)
+        requests.post(DISCORD_WEBHOOK, json={"content": msg[:1950]}, timeout=15).raise_for_status()
+        with open(video_file, "rb") as vf:
+            requests.post(
+                DISCORD_WEBHOOK,
+                files={"file": ("finance_brief.mp4", vf, "video/mp4")},
+                timeout=30
+            ).raise_for_status()
+
+        print("✅ 重大財經快報與短影音已成功推送至 Discord！", flush=True)
+
+    except Exception as e:
+        print(f"⚠️ 生成語音或短影音失敗: {e}，改為僅推送文字快報至 Discord。", flush=True)
+        send_text_discord_alert(analysis, candidates)
+    finally:
+        # Clean up generated files
+        for f in [audio_file, video_file, img_path]:
+            if os.path.exists(f):
+                os.remove(f)
 
 if __name__ == "__main__":
     main()
