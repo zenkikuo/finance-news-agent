@@ -59,7 +59,10 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: "fix: auto-patch finance_monitor.py by AI Debug Agent"
-          title: "🤖 [Auto-Debug] AI 修復 finance_monitor.py 執行錯誤"
+          title: "🤖 [Auto-Debug] AI 修復 finance_monitor.py (#${{ github.run_number }})"
           body-path: pr_body.md
-          branch: ai-hotfix/finance-patch
+          branch: ai-hotfix/finance-${{ github.run_id }}
+          add-paths: |
+            finance_monitor.py
+            pr_body.md
           delete-branch: true
