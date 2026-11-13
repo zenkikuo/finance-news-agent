@@ -1,11 +1,36 @@
 import os
 import re
 import json
+import time
 import requests
 from google import genai
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
+
+# 免費版皆有配額的模型容錯清單（主模型 503 滿載時自動切換下一顆）
+FALLBACK_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+]
+
+def ask_with_fallback(prompt: str) -> tuple[str, str]:
+    last_err = None
+    for model_name in FALLBACK_MODELS:
+        for attempt in range(2):
+            try:
+                print(f"🤖 嘗試呼叫 {model_name} (第 {attempt + 1} 次)...", flush=True)
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                )
+                return model_name, response.text
+            except Exception as e:
+                last_err = e
+                print(f"⚠️ {model_name} 暫時無法回應: {e}", flush=True)
+                time.sleep(5)
+    raise RuntimeError(f"所有備援模型皆暫時無法連線: {last_err}")
 
 def run_auto_debug():
     if not os.path.exists("error.log"):
@@ -31,13 +56,8 @@ def run_auto_debug():
     {source_code}
     """
 
-    print("Debug Agent (gemini-2.5-flash) 正在分析錯誤並生成修復程式碼...", flush=True)
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-    )
-
-    clean_text = re.sub(r"^```json\s*|\s*```$", "", response.text.strip(), flags=re.MULTILINE)
+    used_model, raw_text = ask_with_fallback(prompt)
+    clean_text = re.sub(r"^```json\s*|\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
     result = json.loads(clean_text)
     diagnosis = result["diagnosis"]
     fixed_code = result["fixed_code"]
@@ -45,21 +65,13 @@ def run_auto_debug():
     with open("finance_monitor.py", "w", encoding="utf-8") as f:
         f.write(fixed_code)
 
-    with open("pr_body.md", "w", encoding="utf-8") as f:
-        f.write(
-            f"### 🤖 AI Debug Agent 自動診斷報告\n\n"
-            f"{diagnosis}\n\n---\n"
-            f"*請檢視 Files changed 確認無誤後，點擊下方 **Merge pull request** 即可套用修復。*"
-        )
-
-    repo_url = f"https://github.com/{os.environ.get('GITHUB_REPOSITORY')}/pulls"
     discord_msg = (
-        f"🛠️ **自動除錯警報！財經監控腳本執行失敗**\n\n"
-        f"**🔍 AI 診斷與修復說明：**\n{diagnosis}\n\n"
-        f"👉 **請前往 GitHub 審核並合併修復 PR：**\n{repo_url}"
+        f"🛠️ **自動除錯完成！（使用模型：`{used_model}`）**\n\n"
+        f"**🔍 AI 診斷與已套用修復：**\n{diagnosis}\n\n"
+        f"✅ 系統已自動將修復推送回 `main` 並重新驗證執行。"
     )
     requests.post(DISCORD_WEBHOOK, json={"content": discord_msg}, timeout=10)
-    print("已完成程式碼修復並發送 Discord 審核通知！", flush=True)
+    print("已完成自動修復並發送 Discord 通知！", flush=True)
 
 if __name__ == "__main__":
     run_auto_debug()
