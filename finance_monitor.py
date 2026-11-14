@@ -20,7 +20,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 SEEN_FILE = "seen_finance.json"
 TAIPEI_TZ = timezone(timedelta(hours=8))
 
-# 多模型自動容錯輪詢清单（主模型 503 滿載時自動切換下一顆）
+# 多模型自動容錯輪詢清單（主模型 503 滿載時自動切換下一顆）
 FALLBACK_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
@@ -34,7 +34,7 @@ RSS_SOURCES = [
     ("新浪財經全球焦點", "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
 ]
 
-# 擴充版第一層關鍵字初篩：涵蓋總經、AI 伺服器、CCL、ABF、PCB、散熱、CoWoS 設備、HBM、矽光子與重電
+# 第一層全供應鏈關鍵字初篩
 KEYWORDS = [
     # 1. 總經、央行與地緣關稅
     "fed", "powell", "fomc", "cpi", "ppi", "pce", "nonfarm", "payroll", "rate", "treasury", "yield",
@@ -96,6 +96,8 @@ def fetch_rss_candidates(seen_ids: set) -> list:
                 title = (item.findtext("title") or "").strip()
                 link = (item.findtext("link") or "").strip()
                 pub_date = (item.findtext("pubDate") or "").strip()
+                raw_desc = (item.findtext("description") or "").strip()
+
                 if not title or not link:
                     continue
 
@@ -103,12 +105,17 @@ def fetch_rss_candidates(seen_ids: set) -> list:
                 if uid in seen_ids:
                     continue
 
-                title_lower = title.lower()
-                if any(kw in title_lower for kw in KEYWORDS):
+                # 清洗 RSS 內建摘要並限制長度
+                clean_desc = re.sub(r"<[^>]+>", " ", raw_desc)
+                clean_desc = re.sub(r"\s+", " ", clean_desc).strip()[:300]
+
+                search_blob = f"{title} {clean_desc}".lower()
+                if any(kw in search_blob for kw in KEYWORDS):
                     candidates.append({
                         "uid": uid,
                         "source": source_name,
                         "title": title,
+                        "desc": clean_desc,
                         "link": link,
                         "pub_date": pub_date
                     })
@@ -120,7 +127,7 @@ def fetch_rss_candidates(seen_ids: set) -> list:
 def analyze_taiwan_impact(candidates: list) -> dict:
     """第二層：台股全供應鏈交易員視角評分（只放行 >= 4 星重大事件）"""
     news_text = "\n".join(
-        [f"- [{c['source']}] {c['title']} ({c['pub_date']})" for c in candidates]
+        [f"{idx}. [{c['source']}] 標題：{c['title']}｜摘要：{c['desc']} ({c['pub_date']})" for idx, c in enumerate(candidates)]
     )
 
     prompt = f"""
@@ -136,10 +143,11 @@ def analyze_taiwan_impact(candidates: list) -> dict:
     {{
       "has_major_news": true 或 false,
       "max_score": 1到5的整數,
+      "relevant_indices": [真正與此重大事件相關的新聞編號整數列表，例如 [1, 2]，切勿納入無關新聞],
       "sentiment": "強烈利多" 或 "偏多" 或 "中性觀望" 或 "偏空" 或 "重大利空",
       "headline": "20字以內的繁體中文震撼主標題（適合當短影音封面標題）",
       "affected_sectors": "受影響台股細分族群與代表性個股（例如：CCL銅箔基板/台光電、台燿；或AI伺服器/鴻海、廣達）",
-      "discord_brief": "條列式繁體中文重點摘要與台股開盤影響推演（250字以內）",
+      "discord_brief": "條列式繁體中文重點摘要與台股開盤影響推演（嚴格根據標題與摘要事實撰寫，勿過度腦補未提及的細節，250字以內）",
       "voice_script": "60秒內可唸完的繁體中文晨間財經快報口播稿（語氣專業簡潔，約130~180字，不可為空字串）"
     }}
 
@@ -245,7 +253,10 @@ def main():
         return
 
     print(f"🚨 偵測到 {analysis['max_score']} 星重大財經事件！準備推播 Discord...", flush=True)
-    sources_links = "\n".join([f"• [{c['source']}] [{c['title']}]({c['link']})" for c in candidates[:4]])
+    indices = analysis.get("relevant_indices", [0, 1])
+    selected = [candidates[i] for i in indices if isinstance(i, int) and 0 <= i < len(candidates)] or candidates[:3]
+    sources_links = "\n".join([f"• [{c['source']}] [{c['title']}](<{c['link']}>)" for c in selected[:4]])
+
     msg = (
         f"🚨 **【{analysis['max_score']}★ 全球財經快報】{analysis['headline']}**\n"
         f"**📊 台股方向判讀：** `{analysis['sentiment']}`｜**🎯 焦點族群：** {analysis['affected_sectors']}\n\n"
