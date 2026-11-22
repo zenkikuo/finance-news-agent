@@ -159,17 +159,34 @@ def analyze_taiwan_impact(candidates: list) -> dict:
     for model_name in FALLBACK_MODELS:
         for attempt in range(2):
             try:
+                print(f"嘗試使用模型 {model_name} 進行分析 (第 {attempt + 1} 次)...", flush=True)
                 response = client.models.generate_content(
                     model=model_name,
                     contents=prompt,
                 )
                 clean_text = re.sub(r"^```json\s*|\s*```$", "", response.text.strip(), flags=re.MULTILINE)
-                return json.loads(clean_text)
+                parsed_analysis = json.loads(clean_text)
+                # 簡單驗證關鍵字段是否存在，增加健壯性
+                if not isinstance(parsed_analysis, dict) or "has_major_news" not in parsed_analysis:
+                    raise ValueError("LLM returned invalid or incomplete JSON structure.")
+                return parsed_analysis
             except Exception as e:
                 last_err = e
-                print(f"⚠️ {model_name} 分析暫時失敗 (第 {attempt + 1} 次): {e}", flush=True)
+                print(f"⚠️ 模型 {model_name} 分析暫時失敗 (第 {attempt + 1} 次): {e}", flush=True)
                 time.sleep(4)
-    raise RuntimeError(f"所有分析模型皆失敗: {last_err}")
+
+    # 如果所有模型和所有嘗試都失敗，則返回一個默認的「無重大新聞」分析結果，避免程式中斷
+    print(f"❌ 所有分析模型皆失敗: {last_err}. 將返回預設分析結果 (無重大快訊)。", flush=True)
+    return {
+        "has_major_news": False,
+        "max_score": 0,
+        "relevant_indices": [],
+        "sentiment": "中性觀望",
+        "headline": "AI分析服務中斷，無法判讀重大財經快訊",
+        "affected_sectors": "N/A",
+        "discord_brief": "因AI分析服務異常，本次未能對財經快訊進行深度解讀。請人工確認最新市場動態。",
+        "voice_script": "AI分析服務暫時中斷，未能生成語音快報。請人工確認市場最新動態。",
+    }
 
 async def generate_tts(text: str, output_mp3: str):
     clean_speech = re.sub(r"[^\w\u4e00-\u9fff，。！？、；：（）%0-9a-zA-Z\s]", "", text).strip()
@@ -185,21 +202,37 @@ def create_video_card(analysis: dict, audio_path: str, output_mp4: str):
     img = Image.new("RGB", (W, H), color=(15, 23, 42))
     draw = ImageDraw.Draw(img)
 
-    font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
-    if not os.path.exists(font_path):
-        font_path = "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc"
+    font_path_candidates = [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+        # Add more common Linux font paths if needed
+    ]
+    
+    actual_font_path = None
+    for path in font_path_candidates:
+        if os.path.exists(path):
+            actual_font_path = path
+            break
 
-    font_tag = ImageFont.truetype(font_path, 42)
-    font_title = ImageFont.truetype(font_path, 66)
-    font_sub = ImageFont.truetype(font_path, 40)
-    font_body = ImageFont.truetype(font_path, 36)
+    if actual_font_path:
+        font_tag = ImageFont.truetype(actual_font_path, 42)
+        font_title = ImageFont.truetype(actual_font_path, 66)
+        font_sub = ImageFont.truetype(actual_font_path, 40)
+        font_body = ImageFont.truetype(actual_font_path, 36)
+    else:
+        print("⚠️ 警告：系統字體缺失，嘗試使用 PIL 內建字體。短影音文字樣式可能受影響。", flush=True)
+        # Fallback to default font if NotoSansCJK-Bold.ttc is not found
+        font_tag = ImageFont.load_default()
+        font_title = ImageFont.load_default()
+        font_sub = ImageFont.load_default()
+        font_body = ImageFont.load_default()
 
     now_str = datetime.now(TAIPEI_TZ).strftime("%Y/%m/%d %H:%M 台北時間")
     sentiment = analysis.get("sentiment", "中性觀望")
     badge_color = (220, 38, 38) if "利多" in sentiment else ((22, 163, 74) if "利空" in sentiment else (202, 138, 4))
 
     draw.rectangle([70, 120, 1010, 210], fill=badge_color)
-    draw.text((100, 140), f"⚡ 全球財經快報｜台股影響：{sentiment}（{'★' * analysis.get('max_score', 4)}）", fill=(255, 255, 255), font=font_tag)
+    draw.text((100, 140), f"⚡ 全球財經快報｜台股影響：{sentiment}（{'★' * analysis.get('max_score', 0)}）", fill=(255, 255, 255), font=font_tag)
     draw.text((70, 240), now_str, fill=(148, 163, 184), font=font_body)
 
     headline = analysis.get("headline", "國際財經重大快訊")
@@ -244,17 +277,26 @@ def main():
     print(f"📥 抓到 {len(candidates)} 則關鍵字候選新聞，送交 AI 評估對台股影響力...", flush=True)
     analysis = analyze_taiwan_impact(candidates)
 
-    for c in candidates:
-        seen_list.append(c["uid"])
-    save_seen(seen_list)
+    # 只有當 AI 分析成功判斷為有任何影響（即使未達4星門檻）時，才將這些新聞標記為已讀
+    if analysis.get("has_major_news") or analysis.get("max_score", 0) > 0:
+        for c in candidates:
+            seen_list.append(c["uid"])
+        save_seen(seen_list)
+    else:
+        print("💡 AI 分析失敗或未偵測到重大快訊，此次候選新聞 UID 不寫入已讀列表，以便未來重新評估。", flush=True)
 
     if not analysis.get("has_major_news") or analysis.get("max_score", 0) < 4:
         print(f"📉 最高影響評分為 {analysis.get('max_score', 0)} 星（未達 4 星門檻），靜默略過推播。", flush=True)
         return
 
     print(f"🚨 偵測到 {analysis['max_score']} 星重大財經事件！準備推播 Discord...", flush=True)
-    indices = analysis.get("relevant_indices", [0, 1])
-    selected = [candidates[i] for i in indices if isinstance(i, int) and 0 <= i < len(candidates)] or candidates[:3]
+    indices = analysis.get("relevant_indices", []) # 預設為空列表，由後續邏輯處理
+    # 如果 AI 未提供相關新聞編號，則預設推送前三則候選新聞
+    selected = [candidates[i] for i in indices if isinstance(i, int) and 0 <= i < len(candidates)]
+    if not selected:
+        print("⚠️ AI 未提供相關新聞編號，將預設推送前三則候選新聞。", flush=True)
+        selected = candidates[:3]
+
     sources_links = "\n".join([f"• [{c['source']}] [{c['title']}](<{c['link']}>)" for c in selected[:4]])
 
     msg = (
