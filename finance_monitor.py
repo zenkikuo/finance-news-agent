@@ -305,7 +305,12 @@ def main():
         f"{analysis['discord_brief']}\n\n"
         f"**🔗 原始新聞來源：**\n{sources_links}"
     )
-    requests.post(DISCORD_WEBHOOK, json={"content": msg[:1950]}, timeout=15).raise_for_status()
+    
+    try:
+        requests.post(DISCORD_WEBHOOK, json={"content": msg[:1950]}, timeout=15).raise_for_status()
+        print("✅ Discord 文字快報已成功推送！", flush=True)
+    except requests.exceptions.RequestException as discord_text_err:
+        print(f"❌ Discord 文字快報推送失敗: {discord_text_err}", flush=True)
 
     try:
         audio_file = "finance_voice.mp3"
