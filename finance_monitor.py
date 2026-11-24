@@ -34,6 +34,9 @@ RSS_SOURCES = [
     ("新浪財經全球焦點", "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
 ]
 
+# RSS 抓取重試配置
+MAX_RSS_RETRIES = 3 # 新增：RSS 抓取最大重試次數
+
 # 第一層全供應鏈關鍵字初篩
 KEYWORDS = [
     # 1. 總經、央行與地緣關稅
@@ -86,41 +89,57 @@ def fetch_rss_candidates(seen_ids: set) -> list:
     headers = {"User-Agent": "Mozilla/5.0 (compatible; FinanceMonitor/1.0)"}
 
     for source_name, url in RSS_SOURCES:
-        try:
-            res = requests.get(url, headers=headers, timeout=15)
-            res.raise_for_status()
-            root = ET.fromstring(res.content)
-            items = root.findall(".//item")[:20]
+        for attempt in range(MAX_RSS_RETRIES): # 新增：重試循環
+            try:
+                print(f"🔄 嘗試從 {source_name} 讀取 RSS (第 {attempt + 1} 次)...", flush=True)
+                res = requests.get(url, headers=headers, timeout=15)
+                res.raise_for_status() # 若狀態碼為 4xx/5xx 則拋出 HTTPError
+                
+                # 成功讀取後解析並處理
+                root = ET.fromstring(res.content)
+                items = root.findall(".//item")[:20]
 
-            for item in items:
-                title = (item.findtext("title") or "").strip()
-                link = (item.findtext("link") or "").strip()
-                pub_date = (item.findtext("pubDate") or "").strip()
-                raw_desc = (item.findtext("description") or "").strip()
+                for item in items:
+                    title = (item.findtext("title") or "").strip()
+                    link = (item.findtext("link") or "").strip()
+                    pub_date = (item.findtext("pubDate") or "").strip()
+                    raw_desc = (item.findtext("description") or "").strip()
 
-                if not title or not link:
-                    continue
+                    if not title or not link:
+                        continue
 
-                uid = hashlib.md5(title.lower().encode("utf-8")).hexdigest()[:12]
-                if uid in seen_ids:
-                    continue
+                    uid = hashlib.md5(title.lower().encode("utf-8")).hexdigest()[:12]
+                    if uid in seen_ids:
+                        continue
 
-                # 清洗 RSS 內建摘要並限制長度
-                clean_desc = re.sub(r"<[^>]+>", " ", raw_desc)
-                clean_desc = re.sub(r"\s+", " ", clean_desc).strip()[:300]
+                    # 清洗 RSS 內建摘要並限制長度
+                    clean_desc = re.sub(r"<[^>]+>", " ", raw_desc)
+                    clean_desc = re.sub(r"\s+", " ", clean_desc).strip()[:300]
 
-                search_blob = f"{title} {clean_desc}".lower()
-                if any(kw in search_blob for kw in KEYWORDS):
-                    candidates.append({
-                        "uid": uid,
-                        "source": source_name,
-                        "title": title,
-                        "desc": clean_desc,
-                        "link": link,
-                        "pub_date": pub_date
-                    })
-        except Exception as e:
-            print(f"⚠️ 讀取 {source_name} RSS 異常: {e}", flush=True)
+                    search_blob = f"{title} {clean_desc}".lower()
+                    if any(kw in search_blob for kw in KEYWORDS):
+                        candidates.append({
+                            "uid": uid,
+                            "source": source_name,
+                            "title": title,
+                            "desc": clean_desc,
+                            "link": link,
+                            "pub_date": pub_date
+                        })
+                break # 成功抓取並處理一個來源，跳出重試循環
+            except requests.exceptions.RequestException as e: # 捕獲所有請求相關錯誤 (包括 503 HTTPError)
+                if attempt < MAX_RSS_RETRIES - 1:
+                    sleep_time = 2**(attempt + 1) # 指數退避
+                    print(f"⚠️ 讀取 {source_name} RSS 暫時失敗: {e}。將在 {sleep_time} 秒後重試。", flush=True)
+                    time.sleep(sleep_time)
+                else:
+                    print(f"❌ 讀取 {source_name} RSS 失敗: {e} (已達最大重試次數)。", flush=True)
+            except ET.ParseError as e: # 捕獲 XML 解析錯誤
+                print(f"⚠️ 解析 {source_name} RSS 內容異常: {e}。跳過此來源。", flush=True)
+                break # 如果是解析錯誤，重試 GET 也沒用
+            except Exception as e: # 捕獲其他未預期的錯誤
+                print(f"⚠️ 處理 {source_name} RSS 時發生未知錯誤: {e}。跳過此來源。", flush=True)
+                break
 
     return candidates[:15]
 
